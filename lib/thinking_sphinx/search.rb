@@ -12,6 +12,10 @@ module ThinkingSphinx
       # return the ids for the matching objects. See #search for syntax
       # examples.
       #
+      # Note that this only searches the Sphinx index, with no ActiveRecord
+      # queries. Thus, if your index is not in sync with the database, this
+      # method may return ids that no longer exist there.
+      #
       def search_for_ids(*args)
         results, client = search_results(*args.clone)
         
@@ -113,6 +117,17 @@ module ThinkingSphinx
       # attribute values to exclude. This is done with the :without option:
       #
       #   User.search :without => {:role_id => 1}
+      #
+      # == Excluding by Primary Key
+      #
+      # There is a shortcut to exclude records by their ActiveRecord primary key:
+      #
+      #   User.search :without_ids => 1
+      #
+      # Pass an array or a single value.
+      #
+      # The primary key must be an integer as a negative filter is used. Note
+      # that for multi-model search, an id may occur in more than one model.
       # 
       # == Sorting
       #
@@ -291,11 +306,16 @@ module ThinkingSphinx
         index_options = klass ? klass.sphinx_indexes.last.options : {}
         
         # Turn :index_weights => { "foo" => 2, User => 1 }
-        # into :index_weights => { "foo" => 2, "user_core" => 1 }
+        # into :index_weights => { "foo" => 2, "user_core" => 1, "user_delta" => 1 }
         if iw = options[:index_weights]
           options[:index_weights] = iw.inject({}) do |hash, (index,weight)|
-            key = index.is_a?(Class) ? "#{ThinkingSphinx::Index.name(index)}_core" : index
-            hash[key] = weight
+            if index.is_a?(Class)
+              name = ThinkingSphinx::Index.name(index)
+              hash["#{name}_core"]  = weight
+              hash["#{name}_delta"] = weight
+            else
+              hash[index] = weight
+            end
             hash
           end
         end
@@ -334,6 +354,11 @@ module ThinkingSphinx
         client.filters += options[:without].collect { |attr,val|
           Riddle::Client::Filter.new attr.to_s, filter_value(val), true
         } if options[:without]
+        
+        # exclusive attribute filter on primary key
+        client.filters += Array(options[:without_ids]).collect { |id|
+          Riddle::Client::Filter.new 'sphinx_internal_id', filter_value(id), true
+        } if options[:without_ids]
         
         client
       end
