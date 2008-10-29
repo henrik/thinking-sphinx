@@ -128,7 +128,41 @@ module ThinkingSphinx
       #
       # The primary key must be an integer as a negative filter is used. Note
       # that for multi-model search, an id may occur in more than one model.
-      # 
+      #
+      # == Infix (Star) Searching
+      #
+      # By default, Sphinx uses English stemming, e.g. matching "shoes" if you
+      # search for "shoe". It won't find "Melbourne" if you search for
+      # "elbourn", though.
+      #
+      # Enable infix searching by something like this in config/sphinx.yml:
+      #
+      #   development:
+      #     enable_star: 1
+      #     min_infix_length: 2
+      #
+      # Note that this will make indexing take longer.
+      #
+      # With those settings (and after reindexing), wildcard asterisks can be used
+      # in queries:
+      #
+      #   Location.search "*elbourn*"
+      #
+      # To automatically add asterisks around every token (but not operators),
+      # pass the :star option:
+      #
+      #   Location.search "elbourn -ustrali", :star => true
+      #
+      # This would become "*elbourn* -*ustrali*". The :star option only adds the
+      # asterisks. You need to make the config/sphinx.yml changes yourself.
+      #
+      # By default, the tokens are assumed to match the regular expression /\w+/u.
+      # If you've modified the charset_table, pass another regular expression, e.g.
+      #
+      #   User.search("oo@bar.c", :star => /[\w@.]+/u)
+      #
+      # to search for "*oo@bar.c*" and not "*oo*@*bar*.*c*".
+      #
       # == Sorting
       #
       # Sphinx can only sort by attributes, so generally you will need to avoid
@@ -213,7 +247,7 @@ module ThinkingSphinx
       # The distance value is returned as a float, representing the distance in
       # metres.
       # 
-      # == Handling a stale index
+      # == Handling a Stale Index
       #
       # Especially if you don't use delta indexing, you risk having records in the
       # Sphinx index that are no longer in the database. By default, those will simply
@@ -326,14 +360,17 @@ module ThinkingSphinx
       # 
       def search_results(*args)
         options = args.extract_options!
+        query   = args.join(' ')
         client  = client_from_options options
         
-        query, filters    = search_conditions(
+        query = star_query(query, options[:star]) if options[:star]
+        
+        extra_query, filters = search_conditions(
           options[:class], options[:conditions] || {}
         )
         client.filters   += filters
-        client.match_mode = :extended unless query.empty?
-        query             = (args + [query]).join(' ')
+        client.match_mode = :extended unless extra_query.empty?
+        query             = [query, extra_query].join(' ')
         query.strip!  # Because "" and " " are not equivalent
                 
         set_sort_options! client, options
@@ -418,6 +455,22 @@ module ThinkingSphinx
         } if options[:without_ids]
         
         client
+      end
+      
+      def star_query(query, custom_token = nil)
+        token = custom_token.is_a?(Regexp) ? custom_token : /\w+/u
+
+        query.gsub(/("#{token}(.*?#{token})?"|#{token})/u) do
+          pre, match, post = $`, $&, $'
+          is_operator = (pre =~ %r{(\W|^)[@~/]\Z})  # E.g. "@foo", "/2", "~3", but not as part of a token
+          is_quote = (match =~ /\A".*"\Z/)  # E.g. "foo bar", with quotes
+          has_star = pre.ends_with?("*") || post.starts_with?("*")
+          if is_operator || is_quote || has_star
+            match
+          else
+            "*#{match}*"
+          end
+        end
       end
       
       def filter_value(value)
